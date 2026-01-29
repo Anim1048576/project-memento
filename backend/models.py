@@ -1,15 +1,8 @@
 import asyncio
-import json
-import secrets
+
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Set
+from typing import Dict, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
-from fastapi.middleware.cors import CORSMiddleware
-
-from fastapi.responses import FileResponse
-from pathlib import Path
 
 @dataclass
 class LockState:
