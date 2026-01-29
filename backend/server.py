@@ -12,65 +12,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pathlib import Path
 
+from backend.room import Room
+from backend.transport import *
+
 
 BASE_DIR = Path(__file__).resolve().parents[1]  # 프로젝트 루트
-
-@dataclass
-class LockState:
-    active: bool = False
-    owner: Optional[str] = None
-    proposal_id: Optional[str] = None
-    reason: Optional[str] = None
-
-
-@dataclass
-class RoomState:
-    room_code: str
-    version: int = 0
-    phase: str = "PLAYER"
-    round: int = 1
-    # player_id -> ready bool
-    ready: Dict[str, bool] = field(default_factory=dict)
-    lock: LockState = field(default_factory=LockState)
-    # player_id -> pending proposal_id (for UI)
-    pending: Dict[str, Optional[str]] = field(default_factory=dict)
-    # room-level mutex for serializing "state-changing" operations
-    mutex: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-
-class Room:
-    def __init__(self, code: str):
-        self.state = RoomState(room_code=code)
-        self.connections: Dict[str, WebSocket] = {}  # player_id -> socket
-
-    def players(self):
-        return list(self.connections.keys())
-
-    def public_view(self):
-        return {
-            "roomCode": self.state.room_code,
-            "version": self.state.version,
-            "phase": self.state.phase,
-            "round": self.state.round,
-            "players": [{"id": pid, "ready": self.state.ready.get(pid, False)} for pid in self.players()],
-            "ready": dict(self.state.ready),
-            "lock": {
-                "active": self.state.lock.active,
-                "owner": self.state.lock.owner,
-                "proposalId": self.state.lock.proposal_id,
-                "reason": self.state.lock.reason,
-            },
-        }
-
-    def snapshot_for(self, player_id: str):
-        # 협동/지인용 MVP라서 상대 손패 숨김 같은 건 아직 안 함.
-        # "나에게 필요한 정보"만 pending 포함해서 준다.
-        base = self.public_view()
-        base["you"] = {
-            "id": player_id,
-            "pendingChoice": self.state.pending.get(player_id),
-        }
-        return base
 
 
 app = FastAPI()
@@ -99,33 +45,6 @@ def new_player_id() -> str:
 
 def new_proposal_id() -> str:
     return "p_" + secrets.token_hex(4)
-
-
-async def send_json(ws: WebSocket, payload: dict):
-    await ws.send_text(json.dumps(payload, ensure_ascii=False))
-
-
-async def broadcast_room(room: Room, payload: dict):
-    dead: Set[str] = set()
-    for pid, ws in room.connections.items():
-        try:
-            await send_json(ws, payload)
-        except Exception:
-            dead.add(pid)
-    for pid in dead:
-        room.connections.pop(pid, None)
-        room.state.ready.pop(pid, None)
-        room.state.pending.pop(pid, None)
-
-
-async def broadcast_snapshots(room: Room):
-    # 각 플레이어별로 개인화 스냅샷 전송
-    for pid, ws in list(room.connections.items()):
-        await send_json(ws, {
-            "type": "STATE_SNAPSHOT",
-            "gameId": room.state.room_code,
-            "state": room.snapshot_for(pid),
-        })
 
 
 @app.get("/")
