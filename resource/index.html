@@ -1,0 +1,104 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Co-op StS MVP</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 12px; }
+    input, button { font-size: 16px; padding: 10px; margin: 4px 0; width: 100%; }
+    #log { white-space: pre-wrap; border: 1px solid #ccc; padding: 10px; height: 40vh; overflow: auto; }
+    .row { display: flex; gap: 8px; }
+    .row button { width: 100%; }
+  </style>
+</head>
+<body>
+  <h3>Co-op StS MVP (PROPOSE/COMMIT/CANCEL + GLOBAL LOCK)</h3>
+
+  <label>Room Code</label>
+  <input id="room" value="test" />
+
+  <button id="connect">Connect</button>
+
+  <div class="row">
+    <button id="propose">PROPOSE</button>
+    <button id="commit">COMMIT</button>
+  </div>
+  <div class="row">
+    <button id="cancel">CANCEL</button>
+    <button id="ready">READY</button>
+  </div>
+
+  <div id="log"></div>
+
+<script>
+let ws = null;
+let seq = 1;
+let playerId = null;
+let lastProposalId = null;
+
+const logEl = document.getElementById("log");
+function log(x) {
+  logEl.textContent += x + "\n";
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function send(obj) {
+  if (!ws || ws.readyState !== 1) return log("WS not connected");
+  obj.seq = seq++;
+  ws.send(JSON.stringify(obj));
+}
+
+function connect() {
+  const room = document.getElementById("room").value.trim();
+  const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/${room}`;
+  log("Connecting: " + url);
+
+  ws = new WebSocket(url);
+
+  ws.onopen = () => log("WS OPEN");
+  ws.onclose = () => log("WS CLOSE");
+  ws.onerror = () => log("WS ERROR");
+
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    log("<= " + JSON.stringify(msg));
+
+    if (msg.type === "WELCOME") {
+      playerId = msg.playerId;
+      log("You are " + playerId);
+    }
+    if (msg.type === "PENDING") {
+      lastProposalId = msg.proposalId;
+      log("Pending proposalId = " + lastProposalId);
+    }
+    if (msg.type === "STATE_SNAPSHOT") {
+      // 스냅샷에서 내 pending도 확인 가능
+      const st = msg.state;
+      if (st && st.you) lastProposalId = st.you.pendingChoice || lastProposalId;
+    }
+  };
+}
+
+document.getElementById("connect").onclick = connect;
+
+document.getElementById("propose").onclick = () => {
+  send({ type: "PROPOSE", prompt: "Use Card X on Enemy?" });
+};
+
+document.getElementById("commit").onclick = () => {
+  if (!lastProposalId) return log("No proposalId yet");
+  send({ type: "COMMIT", proposalId: lastProposalId });
+};
+
+document.getElementById("cancel").onclick = () => {
+  if (!lastProposalId) return log("No proposalId yet");
+  send({ type: "CANCEL", proposalId: lastProposalId });
+};
+
+document.getElementById("ready").onclick = () => {
+  send({ type: "READY", ready: true });
+};
+</script>
+</body>
+</html>
