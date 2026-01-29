@@ -173,6 +173,14 @@ async def ws_endpoint(ws: WebSocket, room_code: str):
                             room.state.ready[pid] = False
                         room.state.version += 1
                         await broadcast_snapshots(room)
+                
+                elif mtype == "RESYNC":
+                    # 재연결/처음 연결에서 "현재 스냅샷 다시 보내줘"
+                    await send_json(ws, {
+                        "type": "STATE_SNAPSHOT",
+                        "gameId": room.state.room_code,
+                        "state": room.snapshot_for(player_id),
+                    })
 
                 else:
                     await send_json(ws, reject("UNKNOWN_TYPE"))
@@ -185,9 +193,20 @@ async def ws_endpoint(ws: WebSocket, room_code: str):
         room.state.ready.pop(player_id, None)
         room.state.pending.pop(player_id, None)
 
+        # If the lock owner disconnects, auto-cancel to avoid deadlock.
+        async with room.state.mutex:
+            if room.state.lock.active and room.state.lock.owner == player_id:
+                room.state.lock.active = False
+                room.state.lock.owner = None
+                room.state.lock.proposal_id = None
+                room.state.lock.reason = None
+                room.state.version += 1
+                await broadcast_room(room, {
+                    "type": "CANCELED",
+                    "by": "SERVER",
+                    "reason": "OWNER_DISCONNECTED",
+                    "version": room.state.version,
+                })
+
         await broadcast_room(room, {"type": "INFO", "msg": f"{player_id} left"})
         await broadcast_snapshots(room)
-
-        # room empty -> delete
-        if not room.connections:
-            rooms.pop(room_code, None)

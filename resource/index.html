@@ -37,50 +37,111 @@ let seq = 1;
 let playerId = null;
 let lastProposalId = null;
 
+let reconnectDelay = 1200;        // 시작 1.2초
+const reconnectMax = 8000;       // 최대 8초
+let reconnectTimer = null;
+let roomCode = "test";           // 입력값에서 갱신
+let wantConnected = false;       // 사용자가 connect 누른 상태인지
+
 const logEl = document.getElementById("log");
+
 function log(x) {
   logEl.textContent += x + "\n";
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-function send(obj) {
-  if (!ws || ws.readyState !== 1) return log("WS not connected");
-  obj.seq = seq++;
-  ws.send(JSON.stringify(obj));
+
+function wsUrlFor(room) {
+  const scheme = (location.protocol === "https:") ? "wss" : "ws";
+  return `${scheme}://${location.host}/ws/${room}`;
 }
 
 function connect() {
-  const room = document.getElementById("room").value.trim();
-  const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/${room}`;
-  log("Connecting: " + url);
+  if (!wantConnected) return;
+
+  roomCode = document.getElementById("room").value.trim() || "test";
+  const url = wsUrlFor(roomCode);
+  log(`Connecting: ${url}`);
 
   ws = new WebSocket(url);
 
-  ws.onopen = () => log("WS OPEN");
-  ws.onclose = () => log("WS CLOSE");
-  ws.onerror = () => log("WS ERROR");
+  ws.onopen = () => {
+    log("WS OPEN");
+    reconnectDelay = 500; // 성공하면 backoff 초기화
+
+    // 재연결/첫 연결 공통: 서버에게 "상태 다시 줘" 요청
+    send({ type: "RESYNC" });
+  };
+
+  ws.onclose = () => {
+    log("WS CLOSE");
+    ws = null;
+    playerId = null;
+    lastProposalId = null;
+
+    // 자동 재연결
+    if (wantConnected) {
+      const d = reconnectDelay;
+      reconnectDelay = Math.min(reconnectDelay * 2, reconnectMax);
+      log(`Reconnecting in ${d}ms...`);
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connect, d);
+    }
+  };
+
+  ws.onerror = () => {
+    log("WS ERROR");
+    // 보통 error 후 close가 따라오니 여기선 별도 처리 안 해도 됨
+  };
 
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
+
+    // 스냅샷은 요약 로그로 바꾸면 덜 어지러움
+    if (msg.type === "STATE_SNAPSHOT") {
+      const st = msg.state;
+      const lock = st.lock?.active ? `LOCK by ${st.lock.owner}` : "LOCK off";
+      const ready = Object.entries(st.ready).map(([k,v]) => `${k}:${v?'Y':'N'}`).join(" ");
+      log(`SNAP v${st.version} r${st.round} ${st.phase} | ${lock} | ${ready}`);
+      // 내 pendingChoice가 있으면 lastProposalId 유지 가능
+      if (st.you?.pendingChoice) lastProposalId = st.you.pendingChoice;
+      return;
+    }
+
     log("<= " + JSON.stringify(msg));
 
     if (msg.type === "WELCOME") {
       playerId = msg.playerId;
       log("You are " + playerId);
     }
+
+    // PENDING은 "내가 owner일 때만" proposalId 잡기
     if (msg.type === "PENDING") {
-      lastProposalId = msg.proposalId;
-      log("Pending proposalId = " + lastProposalId);
-    }
-    if (msg.type === "STATE_SNAPSHOT") {
-      // 스냅샷에서 내 pending도 확인 가능
-      const st = msg.state;
-      if (st && st.you) lastProposalId = st.you.pendingChoice || lastProposalId;
+      if (msg.owner === playerId) {
+        lastProposalId = msg.proposalId;
+        log("Pending proposalId = " + lastProposalId);
+      } else {
+        log("Someone else is confirming.");
+      }
     }
   };
 }
 
-document.getElementById("connect").onclick = connect;
+// send 함수는 ws 연결 체크 + seq 부여
+function send(obj) {
+  if (!ws || ws.readyState !== 1) {
+    log("WS not connected");
+    return;
+  }
+  obj.seq = seq++;
+  ws.send(JSON.stringify(obj));
+}
+
+// 버튼
+document.getElementById("connect").onclick = () => {
+  wantConnected = true;
+  connect();
+};
 
 document.getElementById("propose").onclick = () => {
   send({ type: "PROPOSE", prompt: "Use Card X on Enemy?" });
